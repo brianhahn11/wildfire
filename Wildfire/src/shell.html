@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WILDFIRE — Aethermere</title>
+<style>
+  /* The page is the game and nothing else. There was a title bar, a build
+     blurb, a grid of key bindings and a paragraph of notes around the canvas;
+     all of it duplicated something the title screen already says, and all of
+     it pulled the eye away from the one thing on the page that matters. */
+  :root{ color-scheme: dark; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; height:100%; background:#000; overflow:hidden; }
+  body{
+    font-family:ui-monospace,"SFMono-Regular",Menlo,"Courier New",monospace;
+    -webkit-user-select:none; user-select:none;
+    display:flex; align-items:center; justify-content:center;
+  }
+  /* 16:9, as large as the window allows, letterboxed rather than stretched —
+     at 480x270 a non-integer aspect turns every pixel into a smear. */
+  .screen{
+    position:relative; background:#000;
+    width:min(100vw, calc(100vh * 16 / 9));
+    height:min(100vh, calc(100vw * 9 / 16));
+    overflow:hidden;
+  }
+  canvas{ image-rendering:pixelated; image-rendering:crisp-edges;
+          display:block; width:100%; height:100%; }
+  .scan{ position:absolute; inset:0; pointer-events:none; mix-blend-mode:multiply;
+         background:repeating-linear-gradient(to bottom,
+           rgba(0,0,0,0) 0 2px, rgba(0,0,0,.12) 3px 4px); }
+</style>
+</head>
+<body>
+<div class="screen">
+  <canvas id="game" width="480" height="270"></canvas>
+  <div class="scan"></div>
+</div>
+
+<script>

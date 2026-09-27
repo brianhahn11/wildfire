@@ -1,0 +1,1162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>WILDFIRE — 16-bit Forest Defense</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<style>
+  html,body{margin:0;padding:0;background:#0b0710;overscroll-behavior:none;}
+  body{font-family:ui-monospace,"Courier New",monospace;-webkit-user-select:none;user-select:none;}
+  canvas{image-rendering:pixelated;image-rendering:crisp-edges;display:block;}
+  .scan{pointer-events:none;position:absolute;inset:0;background:repeating-linear-gradient(to bottom,rgba(0,0,0,0) 0px,rgba(0,0,0,0) 2px,rgba(0,0,0,.18) 3px,rgba(0,0,0,.18) 4px);mix-blend-mode:multiply;}
+  .bezel{box-shadow:0 0 0 4px #241a33,0 0 0 8px #120c1c,0 0 44px rgba(255,120,40,.22),0 18px 60px rgba(0,0,0,.8);}
+  .tbtn{touch-action:none;}
+  .tbtn:active{filter:brightness(1.6);}
+</style>
+</head>
+<body class="min-h-screen flex items-center justify-center p-2">
+
+<div class="w-full" style="max-width:1024px">
+  <div class="flex items-end justify-between mb-2 px-1">
+    <div>
+      <h1 class="text-[#ffb347] tracking-[.35em] text-sm sm:text-base font-bold" style="text-shadow:2px 2px 0 #7a2410">WILDFIRE</h1>
+      <p class="text-[#6b5a7a] text-[10px] tracking-widest">FOREST DEFENSE UNIT</p>
+    </div>
+    <p class="text-[#6b5a7a] text-[10px] text-right leading-4 hidden sm:block">
+      WASD/ARROWS MOVE · SPACE HOSE<br>SHIFT CUT FIREBREAK · P PAUSE · R RESTART
+    </p>
+  </div>
+
+  <div class="relative bezel rounded-sm overflow-hidden bg-black">
+    <canvas id="game" width="512" height="386" class="w-full h-auto"></canvas>
+    <div class="scan"></div>
+  </div>
+
+  <!-- touch controls -->
+  <div id="touch" class="mt-3 hidden grid-cols-2 gap-4 items-center">
+    <div class="grid grid-cols-3 gap-1 w-40 mx-auto">
+      <div></div>
+      <button data-k="up"    class="tbtn bg-[#241a33] text-[#ffb347] py-3 rounded">▲</button>
+      <div></div>
+      <button data-k="left"  class="tbtn bg-[#241a33] text-[#ffb347] py-3 rounded">◀</button>
+      <button data-k="down"  class="tbtn bg-[#241a33] text-[#ffb347] py-3 rounded">▼</button>
+      <button data-k="right" class="tbtn bg-[#241a33] text-[#ffb347] py-3 rounded">▶</button>
+    </div>
+    <div class="flex gap-3 justify-center">
+      <button data-k="spray" class="tbtn bg-[#1b4a7a] text-white w-20 h-20 rounded-full text-xs font-bold">HOSE</button>
+      <button data-k="chop"  class="tbtn bg-[#6b3a1b] text-white w-20 h-20 rounded-full text-xs font-bold">CUT</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* ============================================================================
+   WILDFIRE — top-down 16-bit forest defense
+   Single-file, no external assets. Canvas 512x384, 32x24 tiles @ 16px.
+   ========================================================================== */
+
+// ---------------------------------------------------------------- constants
+const TILE = 16, COLS = 32, ROWS = 22;
+const HUD_H = 34;                         // HUD band across the top
+const WORLD_W = COLS * TILE;              // 512
+const WORLD_H = ROWS * TILE;              // 352
+const WORLD_Y = HUD_H;                    // playfield starts below the HUD
+const VW = WORLD_W, VH = HUD_H + WORLD_H;   // 512 x 386
+const T = { DIRT:0, SAND:1, GRASS:2, BRUSH:3, TREE:4, WATER:5, ROCK:6, CABIN:7, ASH:8 };
+
+// per-type: flammability (ignition chance mult), burn seconds, score when doused
+const FLAM  = [0, 0, 0.60, 0.85, 1.00, 0, 0, 0.40, 0];
+const BURNT = [0, 0, 1.3,  1.9,  2.8,  0, 0, 5.0,  0];
+const SOLID = [0, 0, 0,    0,    0,    1, 1, 1,    0];   // blocks player movement
+const GREEN = [0, 0, 1,    1,    1,    0, 0, 0,    0];   // counts as forest
+
+const PAL = {
+  dirt:'#6b5138', dirtD:'#57402c', sand:'#c2a469', sandD:'#a98a53',
+  grass:'#4e9b3f', grassD:'#3d7c31', grassL:'#6cba52',
+  brush:'#2f7a34', brushD:'#245e28', brushL:'#49a04a',
+  tree:'#1f5c2c', treeD:'#154020', treeL:'#2f8039', trunk:'#4a3320',
+  water:'#2a6ec4', waterD:'#1d4f94', waterL:'#4f9ae8',
+  rock:'#7b7f8c', rockD:'#5a5e69', rockL:'#a4a8b4',
+  cabin:'#8a5a33', cabinD:'#64401f', roof:'#b2453a', roofD:'#8a3129',
+  ash:'#453a33', ashD:'#332a26', ashL:'#5c4e44', soot:'#241d1a',
+  char:'#1c1512', charL:'#3d2f26', ember:'#ff7b2e'
+};
+
+// ---------------------------------------------------------------- utilities
+const clamp=(v,a,b)=>v<a?a:v>b?b:v;
+const lerp=(a,b,t)=>a+(b-a)*t;
+function makeRng(seed){let s=seed>>>0||1;return()=>{s^=s<<13;s>>>=0;s^=s>>17;s^=s<<5;s>>>=0;return s/4294967296;};}
+function hash2(x,y){let h=x*374761393+y*668265263;h=(h^(h>>13))*1274126177;return ((h^(h>>16))>>>0)/4294967296;}
+
+// smooth value noise for terrain
+function valueNoise(rng,w,h,scale){
+  const gw=Math.ceil(w/scale)+2, gh=Math.ceil(h/scale)+2, g=new Float32Array(gw*gh);
+  for(let i=0;i<g.length;i++) g[i]=rng();
+  const out=new Float32Array(w*h);
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const fx=x/scale, fy=y/scale, x0=Math.floor(fx), y0=Math.floor(fy);
+    const tx=fx-x0, ty=fy-y0, sx=tx*tx*(3-2*tx), sy=ty*ty*(3-2*ty);
+    const a=g[y0*gw+x0], b=g[y0*gw+x0+1], c=g[(y0+1)*gw+x0], d=g[(y0+1)*gw+x0+1];
+    out[y*w+x]=lerp(lerp(a,b,sx),lerp(c,d,sx),sy);
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------- audio (Web Audio, all procedural)
+const Sfx = (()=>{
+  let ctx=null, master=null, muted=false;
+  function ensure(){
+    if(ctx) return ctx;
+    const AC = window.AudioContext||window.webkitAudioContext; if(!AC) return null;
+    ctx=new AC(); master=ctx.createGain(); master.gain.value=0.28; master.connect(ctx.destination);
+    return ctx;
+  }
+  function resume(){ const c=ensure(); if(c&&c.state==='suspended') c.resume(); }
+  function tone(type,f0,f1,dur,vol,delay){
+    const c=ensure(); if(!c||muted) return;
+    const t=c.currentTime+(delay||0);
+    const o=c.createOscillator(), g=c.createGain();
+    o.type=type; o.frequency.setValueAtTime(f0,t);
+    if(f1!==f0) o.frequency.exponentialRampToValueAtTime(Math.max(20,f1),t+dur);
+    g.gain.setValueAtTime(0.0001,t);
+    g.gain.exponentialRampToValueAtTime(vol,t+0.008);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+    o.connect(g); g.connect(master); o.start(t); o.stop(t+dur+0.02);
+  }
+  function noise(dur,vol,filtFrom,filtTo){
+    const c=ensure(); if(!c||muted) return;
+    const t=c.currentTime, n=Math.floor(c.sampleRate*dur);
+    const buf=c.createBuffer(1,n,c.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<n;i++) d[i]=(Math.random()*2-1);
+    const src=c.createBufferSource(); src.buffer=buf;
+    const bp=c.createBiquadFilter(); bp.type='bandpass'; bp.Q=0.8;
+    bp.frequency.setValueAtTime(filtFrom,t); bp.frequency.exponentialRampToValueAtTime(filtTo,t+dur);
+    const g=c.createGain(); g.gain.setValueAtTime(vol,t); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+    src.connect(bp); bp.connect(g); g.connect(master); src.start(t); src.stop(t+dur);
+  }
+  return {
+    resume, ensure,
+    toggle(){ muted=!muted; if(master) master.gain.value=muted?0:0.28; return muted; },
+    isMuted(){ return muted; },
+    spray(){ noise(0.09,0.10,1800,600); },
+    chop(){ tone('square',220,90,0.09,0.20); noise(0.07,0.09,900,300); },
+    douse(){ noise(0.22,0.16,2600,300); tone('sine',680,220,0.16,0.07); },
+    ignite(){ noise(0.30,0.12,320,90); },
+    rescue(){ tone('square',523,523,0.07,0.16); tone('square',659,659,0.07,0.16,0.07); tone('square',784,784,0.12,0.16,0.14); tone('square',1046,1046,0.18,0.14,0.22); },
+    refill(){ tone('triangle',300,900,0.18,0.14); },
+    hurt(){ tone('sawtooth',300,70,0.22,0.20); },
+    level(){ [392,494,587,784].forEach((f,i)=>tone('square',f,f,0.14,0.15,i*0.1)); },
+    over(){ [392,330,262,196].forEach((f,i)=>tone('sawtooth',f,f*0.92,0.30,0.18,i*0.16)); },
+    win(){ [523,659,784,1046,1318].forEach((f,i)=>tone('square',f,f,0.20,0.15,i*0.12)); },
+    start(){ tone('square',330,660,0.12,0.16); tone('square',660,990,0.14,0.14,0.1); }
+  };
+})();
+
+// ---------------------------------------------------------------- game state
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha:false });
+ctx.imageSmoothingEnabled = false;
+
+canvas.width = VW; canvas.height = VH;
+const terrainCv = document.createElement('canvas');
+terrainCv.width = WORLD_W; terrainCv.height = WORLD_H;
+const tctx = terrainCv.getContext('2d'); tctx.imageSmoothingEnabled=false;
+
+const ST = { TITLE:0, PLAY:1, PAUSE:2, OVER:3, WIN:4, BRIEF:5 };
+
+const G = {
+  state: ST.TITLE,
+  level: 1, score: 0, time: 0, briefT: 0,
+  type:null, burn:null, wet:null, dirty:null,
+  survivors: [], particles: [], floats: [],
+  wind: { a: 0, tgt: 0, s: 0.55 },
+  shake: 0, flash: 0, greenStart: 1, msg:'',
+  rng: makeRng(1)
+};
+
+const player = {
+  x: 0, y: 0, dx: 0, dy: 1, spd: 74, hp: 3, maxhp: 3,
+  water: 100, maxwater: 100, anim: 0, frame: 0, moving:false,
+  spraying:false, chopping:false, chopT:0, chopKey:-1, iframe:0
+};
+
+const keys = Object.create(null);
+const touch = { up:0,down:0,left:0,right:0,spray:0,chop:0 };
+
+// ---------------------------------------------------------------- map gen
+function idx(cx,cy){ return cy*COLS+cx; }
+function inBounds(cx,cy){ return cx>=0&&cy>=0&&cx<COLS&&cy<ROWS; }
+
+function generateMap(level){
+  const rng = makeRng(0x9e37 + level*7919);
+  G.rng = rng;
+  const type = new Uint8Array(COLS*ROWS);
+  const n1 = valueNoise(rng, COLS, ROWS, 6.5);
+  const n2 = valueNoise(rng, COLS, ROWS, 2.6);
+
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const v = n1[y*COLS+x]*0.68 + n2[y*COLS+x]*0.32;
+    let t;
+    if(v < 0.31) t = T.WATER;
+    else if(v < 0.36) t = T.SAND;
+    else if(v < 0.47) t = T.GRASS;
+    else if(v < 0.64) t = T.BRUSH;
+    else t = T.TREE;
+    if(t===T.TREE && n2[y*COLS+x] > 0.80 && rng()<0.40) t = T.ROCK;
+    type[idx(x,y)] = t;
+  }
+
+  // natural clearings — rocky meadows that break the fuel bed into pockets
+  for(let k=0;k<4+Math.floor(rng()*3);k++){
+    const mx=2+Math.floor(rng()*(COLS-4)), my=2+Math.floor(rng()*(ROWS-4)), r=1+rng()*1.8;
+    for(let y=my-3;y<=my+3;y++) for(let x=mx-3;x<=mx+3;x++){
+      if(!inBounds(x,y)) continue;
+      if(Math.hypot(x-mx,y-my) > r + rng()*0.9) continue;
+      const j=idx(x,y); if(type[j]===T.WATER) continue;
+      type[j] = rng()<0.18 ? T.ROCK : (rng()<0.5 ? T.DIRT : T.SAND);
+    }
+  }
+  // guarantee at least one pond
+  let hasWater = type.some(t=>t===T.WATER);
+  if(!hasWater){
+    const px = 4+Math.floor(rng()*(COLS-10)), py = 4+Math.floor(rng()*(ROWS-10));
+    for(let y=py;y<py+3;y++) for(let x=px;x<px+4;x++) if(inBounds(x,y)) type[idx(x,y)]=T.WATER;
+    for(let y=py-1;y<py+4;y++) for(let x=px-1;x<px+5;x++) if(inBounds(x,y)&&type[idx(x,y)]!==T.WATER) type[idx(x,y)]=T.SAND;
+  }
+
+  // ranger station: cluster of cabins on a cleared pad, always in the lower band
+  let sx=0, sy=0, tries=0;
+  do{ sx = 3+Math.floor(rng()*(COLS-9)); sy = ROWS-7+Math.floor(rng()*3); tries++; }
+  while(tries<60 && type[idx(sx,sy)]===T.WATER);
+  const station = [];
+  for(let y=sy-1;y<=sy+2;y++) for(let x=sx-1;x<=sx+4;x++)
+    if(inBounds(x,y) && type[idx(x,y)]!==T.WATER) type[idx(x,y)]=T.DIRT;
+  for(const [ox,oy] of [[0,0],[2,0],[4,0],[1,2],[3,2]]){
+    const x=sx+ox, y=sy+oy;
+    if(inBounds(x,y) && type[idx(x,y)]!==T.WATER){ type[idx(x,y)]=T.CABIN; station.push([x,y]); }
+  }
+
+  G.type = type;
+  G.burn = new Float32Array(COLS*ROWS);
+  G.burnMax = new Float32Array(COLS*ROWS);
+  G.wet  = new Float32Array(COLS*ROWS);
+  G.dirty = true;
+  G.station = station;
+
+  // player spawn: walkable tile near the station
+  let px=sx+2, py=sy+1;
+  for(let r=0;r<200;r++){
+    const x=sx+Math.floor(rng()*6)-1, y=sy+Math.floor(rng()*5)-2;
+    if(inBounds(x,y) && !SOLID[type[idx(x,y)]]){ px=x; py=y; break; }
+  }
+  player.x = px*TILE+TILE/2; player.y = py*TILE+TILE/2;
+  player.hp = player.maxhp; player.water = player.maxwater;
+  player.iframe = 0; player.heatT = 0; player.dx=0; player.dy=1;
+
+  // survivors — campers stranded in the woods, upper two thirds
+  G.survivors = [];
+  const nSurv = Math.min(3 + level, 7);
+  let guard=0;
+  while(G.survivors.length < nSurv && guard++ < 4000){
+    const x = 1+Math.floor(rng()*(COLS-2)), y = 1+Math.floor(rng()*(ROWS*0.7));
+    if(SOLID[type[idx(x,y)]] || type[idx(x,y)]===T.WATER) continue;
+    if(G.survivors.some(s=>Math.abs(s.cx-x)<3 && Math.abs(s.cy-y)<3)) continue;
+    G.survivors.push({ cx:x, cy:y, x:x*TILE+8, y:y*TILE+8, saved:false, lost:false,
+                       t:Math.random()*6, panic:0, burnT:0, moveT:0 });
+  }
+
+  // starting green count for scoring / loss threshold
+  let g=0; for(let i=0;i<type.length;i++) if(GREEN[type[i]]) g++;
+  G.greenStart = Math.max(1,g);
+
+  G.lost = 0; G.allClear = 0;
+  G.particles.length = 0; G.floats.length = 0;
+  G.wind.a = rng()*Math.PI*2; G.wind.tgt = G.wind.a;
+  G.wind.s = 0.45 + level*0.09;
+  G.fireTick = 0; G.time = 0; G.strikeT = 6.0; G.strikes = 1 + level;
+  G.strikesLeft = G.strikes;
+
+  renderTerrain();
+  // opening ignitions, away from the player
+  for(let i=0;i<Math.min(1+Math.floor(level/2),3);i++) lightning(true);
+}
+
+// ---------------------------------------------------------------- fire
+function ignite(i){
+  if(G.burn[i]>0) return false;
+  const t = G.type[i];
+  if(FLAM[t]<=0) return false;
+  G.burn[i] = BURNT[t];
+  G.burnMax[i] = BURNT[t];
+  return true;
+}
+
+function lightning(silent){
+  // roughly half of all strikes land near a stranded camper — that's the pressure
+  const stranded = G.survivors.filter(s=>!s.saved && !s.lost);
+  const target = (stranded.length && G.rng()<0.5) ? stranded[(G.rng()*stranded.length)|0] : null;
+  for(let a=0;a<400;a++){
+    let x,y;
+    if(target && a<120){
+      x = target.cx + Math.round((G.rng()-0.5)*8);
+      y = target.cy + Math.round((G.rng()-0.5)*8);
+      if(!inBounds(x,y)) continue;
+    } else {
+      x = Math.floor(G.rng()*COLS); y = Math.floor(G.rng()*ROWS);
+    }
+    const i=idx(x,y);
+    if(FLAM[G.type[i]]<=0 || G.type[i]===T.CABIN) continue;
+    const pdx=(x*TILE+8-player.x), pdy=(y*TILE+8-player.y);
+    if(pdx*pdx+pdy*pdy < 70*70) continue;
+    if(ignite(i)){
+      G.wet[i]=0;
+      for(let p=0;p<10;p++) spark(x*TILE+8, y*TILE+8, 1.4);
+      if(!silent){ Sfx.ignite(); G.flash=Math.max(G.flash,0.35); G.shake=Math.max(G.shake,3); }
+      markDirty();
+      return;
+    }
+  }
+}
+
+function updateFire(dt){
+  // burn down + spread on a fixed tick so the sim is deterministic-ish
+  G.fireTick += dt;
+  const STEP = 0.14;
+  let doStep = false;
+  while(G.fireTick >= STEP){ G.fireTick -= STEP; doStep = true; stepFire(STEP); }
+  // continuous burn decay for smooth flames
+  for(let i=0;i<G.burn.length;i++){
+    if(G.burn[i]>0){
+      G.burn[i] -= dt;
+      if(G.burn[i]<=0){ G.burn[i]=0; G.type[i]=T.ASH; markDirty(); }
+    }
+    if(G.wet[i]>0) G.wet[i] = Math.max(0, G.wet[i] - dt*0.10);
+  }
+  return doStep;
+}
+
+function stepFire(step){
+  const wx = Math.cos(G.wind.a), wy = Math.sin(G.wind.a), ws = G.wind.s;
+  const toIgnite = [];
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const i = idx(x,y);
+    if(G.burn[i] <= 0) continue;
+    // only the flaming front throws embers — smouldering tiles have spent their fuel
+    const phase = G.burn[i] / (G.burnMax[i] || 1);
+    if(phase < 0.20) continue;
+    for(let oy=-1;oy<=1;oy++) for(let ox=-1;ox<=1;ox++){
+      if(!ox && !oy) continue;
+      const nx=x+ox, ny=y+oy; if(!inBounds(nx,ny)) continue;
+      const j = idx(nx,ny);
+      if(G.burn[j]>0) continue;
+      const f = FLAM[G.type[j]]; if(f<=0) continue;
+      const len = (ox&&oy)?1.4142:1;
+      const align = (ox*wx + oy*wy)/len;          // -1 upwind .. 1 downwind
+      const windMul = clamp(1 + align*ws*1.9, 0.06, 2.6);
+      const diag = (ox&&oy)?0.55:1;
+      const wetMul = Math.max(0, 1 - G.wet[j]);
+      const p = 0.062 * f * windMul * diag * wetMul;
+      if(Math.random() < p) toIgnite.push(j);
+    }
+  }
+  for(const j of toIgnite){
+    if(ignite(j)){
+      const x=j%COLS, y=(j/COLS)|0;
+      if(G.type[j]===T.CABIN){ Sfx.ignite(); G.shake=Math.max(G.shake,2); }
+      spark(x*TILE+8, y*TILE+8, 0.8);
+    }
+  }
+}
+
+function countFires(){ let n=0; for(let i=0;i<G.burn.length;i++) if(G.burn[i]>0) n++; return n; }
+function countGreen(){ let n=0; for(let i=0;i<G.type.length;i++) if(GREEN[G.type[i]]) n++; return n; }
+
+// ---------------------------------------------------------------- particles
+function spark(x,y,scale){
+  if(G.particles.length>420) return;
+  G.particles.push({x,y,vx:(Math.random()-0.5)*26,vy:-14-Math.random()*26,
+    life:0.5+Math.random()*0.6, max:1.1, kind:0, s:scale||1});
+}
+function droplet(x,y,dx,dy){
+  if(G.particles.length>420) return;
+  G.particles.push({x,y,vx:dx*(40+Math.random()*50),vy:dy*(40+Math.random()*50)+(Math.random()-0.5)*30,
+    life:0.22+Math.random()*0.16, max:0.4, kind:1, s:1});
+}
+function chip(x,y){
+  G.particles.push({x,y,vx:(Math.random()-0.5)*60,vy:-30-Math.random()*40,life:0.4,max:0.4,kind:2,s:1});
+}
+function floatText(x,y,txt,col){ G.floats.push({x,y,txt,col,life:0.9}); }
+
+function updateParticles(dt){
+  const wx=Math.cos(G.wind.a)*G.wind.s*26, wy=Math.sin(G.wind.a)*G.wind.s*26;
+  for(let i=G.particles.length-1;i>=0;i--){
+    const p=G.particles[i]; p.life-=dt;
+    if(p.life<=0){ G.particles.splice(i,1); continue; }
+    if(p.kind===0){ p.vx+=wx*dt*1.6; p.vy-=6*dt; }
+    else if(p.kind===1){ p.vy+=90*dt; }
+    else { p.vy+=200*dt; }
+    p.x+=p.vx*dt; p.y+=p.vy*dt;
+  }
+  for(let i=G.floats.length-1;i>=0;i--){
+    const f=G.floats[i]; f.life-=dt; f.y-=16*dt; if(f.life<=0) G.floats.splice(i,1);
+  }
+}
+
+// ---------------------------------------------------------------- player
+function walkable(px,py){
+  const cx=Math.floor(px/TILE), cy=Math.floor(py/TILE);
+  if(!inBounds(cx,cy)) return false;
+  return !SOLID[G.type[idx(cx,cy)]];
+}
+function canStand(px,py){
+  // 8x8 body box
+  return walkable(px-4,py-2)&&walkable(px+4,py-2)&&walkable(px-4,py+5)&&walkable(px+4,py+5);
+}
+
+function updatePlayer(dt){
+  let mx=0,my=0;
+  if(keys['arrowleft']||keys['a']||touch.left) mx-=1;
+  if(keys['arrowright']||keys['d']||touch.right) mx+=1;
+  if(keys['arrowup']||keys['w']||touch.up) my-=1;
+  if(keys['arrowdown']||keys['s']||touch.down) my+=1;
+
+  player.spraying = !!(keys[' ']||keys['j']||touch.spray) && player.water>0;
+  player.chopping = !!(keys['shift']||keys['k']||touch.chop);
+
+  if(mx||my){
+    const l=Math.hypot(mx,my); mx/=l; my/=l;
+    player.dx=mx; player.dy=my;
+    const sp = player.spd * (player.spraying?0.58:1) * (player.chopping?0.45:1);
+    const nx = player.x + mx*sp*dt, ny = player.y + my*sp*dt;
+    if(canStand(nx,player.y)) player.x=nx;
+    if(canStand(player.x,ny)) player.y=ny;
+    player.moving=true; player.anim+=dt*9;
+  } else { player.moving=false; player.anim+=dt*2.2; }
+  player.x=clamp(player.x,5,WORLD_W-5); player.y=clamp(player.y,5,WORLD_H-5);
+  player.frame = Math.floor(player.anim)%4;
+
+  // --- hose
+  if(player.spraying){
+    player.water = Math.max(0, player.water - 16*dt);
+    if(Math.random()<dt*34) Sfx.spray();
+    const reach = 3.6;
+    for(let s=0.6;s<=reach;s+=0.5){
+      const wxp = player.x + player.dx*s*TILE, wyp = player.y + player.dy*s*TILE;
+      droplet(player.x+player.dx*8, player.y+player.dy*8-2, player.dx, player.dy);
+      const cx=Math.floor(wxp/TILE), cy=Math.floor(wyp/TILE);
+      const spread = s>1.6 ? 1 : 0;
+      for(let oy=-spread;oy<=spread;oy++) for(let ox=-spread;ox<=spread;ox++){
+        const x=cx+ox, y=cy+oy; if(!inBounds(x,y)) continue;
+        const i=idx(x,y);
+        G.wet[i] = Math.min(1.8, G.wet[i] + dt*2.8);
+        if(G.burn[i]>0){
+          G.burn[i] -= dt*5.5;
+          if(G.burn[i]<=0){
+            G.burn[i]=0; G.type[i]=T.ASH; markDirty();
+            G.score += 6; floatText(x*TILE+8,y*TILE+4,'+6','#8fd6ff'); Sfx.douse();
+          }
+        }
+      }
+    }
+  }
+
+  // --- firebreak cutting
+  const fcx = Math.floor((player.x + player.dx*TILE*0.9)/TILE);
+  const fcy = Math.floor((player.y + player.dy*TILE*0.9)/TILE);
+  if(player.chopping && inBounds(fcx,fcy)){
+    const i=idx(fcx,fcy), t=G.type[i];
+    if((t===T.GRASS||t===T.BRUSH||t===T.TREE) && G.burn[i]<=0){
+      if(G.chopKey!==i){ G.chopKey=i; G.chopT=0; }
+      G.chopT += dt;
+      if(Math.random()<dt*9){ Sfx.chop(); chip(fcx*TILE+8,fcy*TILE+8); }
+      const need = t===T.TREE?0.9:(t===T.BRUSH?0.5:0.28);
+      if(G.chopT>=need){
+        G.type[i]=T.DIRT; G.wet[i]=Math.max(G.wet[i],0.25); markDirty();
+        G.chopT=0; G.chopKey=-1; G.score+=2;
+      }
+    } else { G.chopKey=-1; G.chopT=0; }
+  } else { G.chopKey=-1; G.chopT=0; }
+
+  // --- refill at water's edge
+  const pcx=Math.floor(player.x/TILE), pcy=Math.floor(player.y/TILE);
+  let nearWater=false;
+  for(let oy=-1;oy<=1&&!nearWater;oy++) for(let ox=-1;ox<=1;ox++){
+    const x=pcx+ox,y=pcy+oy;
+    if(inBounds(x,y)&&G.type[idx(x,y)]===T.WATER){ nearWater=true; break; }
+  }
+  if(nearWater && player.water < player.maxwater){
+    const before=player.water;
+    player.water = Math.min(player.maxwater, player.water + 62*dt);
+    if(before<player.maxwater && player.water>=player.maxwater) Sfx.refill();
+  }
+
+  // --- standing in fire hurts
+  player.iframe = Math.max(0, player.iframe-dt);
+  const inFlames = inBounds(pcx,pcy) && G.burn[idx(pcx,pcy)]>0;
+  // short grace window: clipping the edge of a flame is survivable, standing in it is not
+  player.heatT = inFlames ? (player.heatT||0)+dt : Math.max(0,(player.heatT||0)-dt*2);
+  if(inFlames && player.heatT>0.40 && player.iframe<=0){
+    player.hp--; player.iframe=1.8; player.heatT=0; Sfx.hurt(); G.shake=6; G.flash=0.4;
+    floatText(player.x,player.y-10,'-1','#ff5b5b');
+    if(player.hp<=0) gameOver('YOU WERE CAUGHT IN THE BLAZE');
+  }
+
+  // --- rescues
+  for(const s of G.survivors){
+    if(s.saved || s.lost) continue;
+    s.t += dt;
+    const i = idx(s.cx,s.cy);
+    const onFire = G.burn[i] > 0;
+    s.panic = onFire ? 1 : (nearFire(s.cx,s.cy) ? 0.6 : 0);
+
+    // stranded in the flames — they can only hold out so long
+    if(onFire){
+      s.burnT += dt;
+      if(s.burnT > 2.6){
+        s.lost = true; G.lost++; G.score = Math.max(0, G.score-100);
+        floatText(s.x, s.y-8, 'LOST', '#ff5b5b');
+        Sfx.hurt(); G.shake = 5; G.flash = 0.3;
+        if(G.lost >= 3 || G.lost >= G.survivors.length) gameOver('YOU LEFT THEM BEHIND');
+        continue;
+      }
+    } else s.burnT = Math.max(0, s.burnT - dt*0.5);
+
+    // These are injured campers — they cannot outrun anything. When their own ground
+    // catches they make one desperate scramble, and often there is nowhere to go.
+    s.moveT = (s.moveT||0) + dt;
+    if(onFire && s.moveT > 0.7){
+      s.moveT = 0;
+      if(Math.random() < 0.5){
+        const opts = [];
+        for(let oy=-1;oy<=1;oy++) for(let ox=-1;ox<=1;ox++){
+          if(!ox && !oy) continue;
+          const x=s.cx+ox, y=s.cy+oy; if(!inBounds(x,y)) continue;
+          const j=idx(x,y);
+          if(SOLID[G.type[j]] || G.type[j]===T.WATER || G.burn[j]>0) continue;
+          opts.push([x,y]);
+        }
+        if(opts.length){ const o=opts[(Math.random()*opts.length)|0]; s.cx=o[0]; s.cy=o[1]; }
+      }
+    }
+
+    s.x += ((s.cx*TILE+8)-s.x)*Math.min(1,dt*6);
+    s.y += ((s.cy*TILE+8)-s.y)*Math.min(1,dt*6);
+    if(Math.hypot(s.x-player.x, s.y-player.y) < 13){
+      s.saved=true; G.score+=150; Sfx.rescue();
+      floatText(s.x,s.y-8,'RESCUED +150','#ffe26a');
+    }
+  }
+}
+
+function nearFire(cx,cy){
+  for(let oy=-2;oy<=2;oy++) for(let ox=-2;ox<=2;ox++){
+    const x=cx+ox,y=cy+oy; if(inBounds(x,y)&&G.burn[idx(x,y)]>0) return true;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------- rules
+function gameOver(msg){ if(G.state!==ST.PLAY) return; G.state=ST.OVER; G.msg=msg; Sfx.over(); }
+
+function checkRules(){
+  const green = countGreen();
+  const lost = 1 - green/G.greenStart;
+  if(lost > 0.80){ gameOver('THE FOREST IS GONE'); return; }
+  const cabinsLeft = G.station.filter(([x,y])=>G.type[idx(x,y)]===T.CABIN).length;
+  if(G.station.length && cabinsLeft===0){ gameOver('THE RANGER STATION BURNED'); return; }
+
+  if(G.strikesLeft<=0 && countFires()===0){
+    // ALL CLEAR: the burn is out, but the level isn't over until every camper is
+    // off the mountain. The player gets a calm window to walk out to them.
+    const stranded = G.survivors.filter(s=>!s.saved && !s.lost);
+    if(stranded.length){
+      G.allClear = (G.allClear||0) + 1/60;
+      // safety valve — if someone is boxed in by water or rock, they self-evacuate
+      if(G.allClear < 25) return;
+      let walkouts = 0;
+      for(const s of stranded){ s.saved = true; s.walkout = true; walkouts++; }
+      G.score += walkouts*75;
+    }
+
+    // only campers you personally reached count toward the grade and the bonus
+    const rescued = G.survivors.filter(s=>s.saved && !s.walkout).length;
+    const frac = green/G.greenStart;
+    const rescueRate = G.survivors.length ? rescued/G.survivors.length : 1;
+    G.bonusRescue = rescued*50;
+    G.bonusForest = Math.round(green*0.6);
+    G.score += G.bonusRescue + G.bonusForest + 200;
+    const q = frac*0.5 + rescueRate*0.5;
+    G.grade = q>0.88?'S' : q>0.76?'A' : q>0.62?'B' : q>0.45?'C' : 'D';
+    G.clearedLevel = G.level;
+    if(G.level>=5){ G.state=ST.WIN; Sfx.win(); }
+    else { G.level++; G.state=ST.BRIEF; G.briefT=0; Sfx.level(); }
+  }
+}
+
+// ---------------------------------------------------------------- rendering: terrain
+function markDirty(){ G.dirty = true; }
+
+function px(c,x,y,w,h){ tctx.fillStyle=c; tctx.fillRect(x,y,w||1,h||1); }
+
+function drawTile(cx,cy){
+  const i=idx(cx,cy), t=G.type[i], X=cx*TILE, Y=cy*TILE, h=hash2(cx,cy), h2=hash2(cx+91,cy+17);
+  switch(t){
+    case T.WATER: {
+      px(PAL.water,X,Y,16,16);
+      px(PAL.waterD,X,Y+((h*8)|0),16,2);
+      px(PAL.waterL,X+((h2*10)|0),Y+4+((h*6)|0),5,1);
+      px(PAL.waterL,X+2+((h*9)|0),Y+11,3,1);
+      // foam where the pond meets land
+      const isLand=(ax,ay)=>inBounds(ax,ay) && G.type[idx(ax,ay)]!==T.WATER;
+      if(isLand(cx,cy-1)) px('#9fd6f5',X,Y,16,1);
+      if(isLand(cx,cy+1)) px('#7fc0e8',X,Y+15,16,1);
+      if(isLand(cx-1,cy)) px('#9fd6f5',X,Y,1,16);
+      if(isLand(cx+1,cy)) px('#7fc0e8',X+15,Y,1,16);
+      break;
+    }
+    case T.SAND: {
+      px(PAL.sand,X,Y,16,16);
+      for(let k=0;k<5;k++){ const hx=hash2(cx*7+k,cy*13); px(PAL.sandD,X+((hx*15)|0),Y+((hash2(cx,cy*5+k)*15)|0),2,1); }
+      break;
+    }
+    case T.DIRT: {
+      px(PAL.dirt,X,Y,16,16);
+      for(let k=0;k<6;k++){ const hx=hash2(cx*3+k,cy*11); px(PAL.dirtD,X+((hx*15)|0),Y+((hash2(cx+k,cy*3)*15)|0),2,1); }
+      break;
+    }
+    case T.ASH: {
+      // mottled grey ash over dark soot, with charred stumps and fallen trunks
+      px(PAL.ash,X,Y,16,16);
+      for(let k=0;k<9;k++){
+        const hx=hash2(cx*5+k,cy*9), hy=hash2(cx*2+k,cy*13);
+        px(hx>0.5?PAL.ashD:PAL.soot, X+((hx*15)|0), Y+((hy*15)|0), 2, 2);
+      }
+      for(let k=0;k<4;k++){
+        const hx=hash2(cx*11+k,cy*3), hy=hash2(cx+k,cy*7);
+        px(PAL.ashL, X+((hx*15)|0), Y+((hy*15)|0), 1, 1);
+      }
+      if(h>0.62){                                  // burnt stump with pale ash at the base
+        const sx2=2+((h2*10)|0), sy2=3+((h*9)|0);
+        px(PAL.char, X+sx2, Y+sy2, 3, 5);
+        px(PAL.charL, X+sx2, Y+sy2, 1, 5);
+        px(PAL.ashL, X+sx2-1, Y+sy2+5, 5, 1);
+      } else if(h>0.42){                           // fallen, blackened trunk
+        const ly=4+((h2*8)|0);
+        px(PAL.char, X+1, Y+ly, 13, 2);
+        px(PAL.charL, X+1, Y+ly, 13, 1);
+      }
+      if(h2>0.93) px('#d4562a', X+6+((h*6)|0), Y+7+((h2*6)|0), 1, 1);   // lingering ember
+      break;
+    }
+    case T.GRASS: {
+      px(PAL.grass,X,Y,16,16);
+      for(let k=0;k<7;k++){
+        const gx=(hash2(cx*13+k,cy*7)*15)|0, gy=(hash2(cx*5,cy*17+k)*14)|0;
+        px(k%2?PAL.grassD:PAL.grassL,X+gx,Y+gy,1,2);
+      }
+      break;
+    }
+    case T.BRUSH: {
+      px(PAL.grassD,X,Y,16,16);
+      for(let k=0;k<3;k++){
+        const bx=1+((hash2(cx*19+k,cy*3)*9)|0), by=1+((hash2(cx*7,cy*23+k)*9)|0);
+        px(PAL.brushD,X+bx,  Y+by+1,6,4);   // rounded scrub bush
+        px(PAL.brushD,X+bx+1,Y+by,  4,6);
+        px(PAL.brush, X+bx+1,Y+by+1,4,3);
+        px(PAL.brushL,X+bx+2,Y+by+1,2,1);
+      }
+      break;
+    }
+    case T.TREE: {
+      px(PAL.grassD,X,Y,16,16);
+      // nudge each tree a pixel or two so the canopy doesn't grid up
+      const tX = X + ((hash2(cx*31,cy*17)*3)|0) - 1;
+      const tY = Y + ((hash2(cx*13,cy*29)*3)|0) - 1;
+      px('rgba(0,0,0,.22)',tX+3,tY+12,11,3);        // ground shadow
+      px(PAL.trunk,tX+7,tY+11,2,4);
+      // rounded canopy, one scanline at a time
+      const CANOPY = h>0.5
+        ? [[1,6,4],[2,4,8],[3,3,10],[4,2,12],[5,2,12],[6,2,12],[7,3,10],[8,4,8],[9,5,6],[10,6,4]]
+        : [[2,6,4],[3,4,8],[4,3,10],[5,3,10],[6,3,10],[7,4,8],[8,5,6],[9,6,4]];
+      for(const r of CANOPY) px(PAL.treeD, tX+r[1], tY+r[0], r[2], 1);
+      for(const r of CANOPY) if(r[2]>5) px(PAL.tree, tX+r[1]+1, tY+r[0], r[2]-2, 1);
+      px(PAL.treeL,tX+4,tY+(h>0.5?3:4),3,1);        // sun catch, upper left
+      px(PAL.treeL,tX+5,tY+(h>0.5?4:5),2,1);
+      px(PAL.treeD,tX+10,tY+(h>0.5?7:6),3,1);       // shade, lower right
+      break;
+    }
+    case T.ROCK: {
+      px(PAL.grassD,X,Y,16,16);
+      px('rgba(0,0,0,.25)',X+2,Y+12,12,2);
+      const ROCK=[[4,5,7],[5,3,10],[6,2,12],[7,2,12],[8,2,12],[9,3,11],[10,3,10],[11,4,8]];
+      for(const r of ROCK) px(PAL.rockD, X+r[1], Y+r[0], r[2], 1);
+      for(const r of ROCK) if(r[2]>6) px(PAL.rock, X+r[1]+1, Y+r[0], r[2]-3, 1);
+      px(PAL.rockL,X+4,Y+5,3,1); px(PAL.rockL,X+3,Y+6,2,1);  // highlight
+      px(PAL.rockD,X+9,Y+9,4,2);                             // crack / shade
+      break;
+    }
+    case T.CABIN: {
+      px(PAL.dirt,X,Y,16,16);
+      px(PAL.cabinD,X+1,Y+6,14,9); px(PAL.cabin,X+2,Y+7,12,7);
+      px(PAL.cabinD,X+2,Y+10,12,1);
+      px(PAL.roofD,X,Y+2,16,5); px(PAL.roof,X+1,Y+2,14,4);
+      px('#3a2a1a',X+6,Y+10,4,5);      // door
+      px('#9fd8ff',X+3,Y+8,2,2);       // window
+      break;
+    }
+  }
+}
+
+function renderTerrain(){
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) drawTile(x,y);
+  G.dirty=false;
+}
+
+// ---------------------------------------------------------------- rendering: entities
+function drawFlames(c){
+  const tsec=G.time;
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const i=idx(x,y), b=G.burn[i]; if(b<=0) continue;
+    const X=x*TILE, Y=y*TILE;
+    const t = tsec*11 + hash2(x,y)*30;
+    const big = Math.min(1, b/ (BURNT[G.type[i]]||2) + 0.35);
+    // scorch base
+    c.fillStyle='rgba(30,12,8,.55)'; c.fillRect(X,Y+10,16,6);
+    for(let f=0;f<3;f++){
+      const ph = t + f*2.1;
+      const fx = X + 3 + f*5 + Math.round(Math.sin(ph)*1.5);
+      const hgt = Math.round((6 + Math.sin(ph*1.7)*3) * big);
+      const fy = Y + 14 - hgt;
+      c.fillStyle='#b3241a'; c.fillRect(fx-1, fy, 4, hgt+2);
+      c.fillStyle='#ff6a1f'; c.fillRect(fx,   fy+1, 2, hgt);
+      if(hgt>5){ c.fillStyle='#ffd34a'; c.fillRect(fx, fy+Math.round(hgt*0.55), 2, Math.max(1,(hgt*0.4)|0)); }
+      if(hgt>7){ c.fillStyle='#fff3b0'; c.fillRect(fx, fy+hgt-1, 1, 2); }
+    }
+    if(Math.random()<0.10) spark(X+4+Math.random()*8, Y+8, 1);
+  }
+}
+
+function drawWet(c){
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++){
+    const w=G.wet[idx(x,y)]; if(w<=0.05) continue;
+    c.fillStyle='rgba(60,140,235,'+Math.min(0.42,w*0.3)+')';
+    c.fillRect(x*TILE,y*TILE,16,16);
+  }
+}
+
+function drawPlayer(c){
+  const X=Math.round(player.x), Y=Math.round(player.y);
+  if(player.iframe>0 && Math.floor(player.iframe*16)%2) return;
+  const bob = player.moving ? (player.frame===1?-1:player.frame===3?1:0) : 0;
+  const top = Y-9+bob;
+
+  c.fillStyle='rgba(0,0,0,.30)'; c.fillRect(X-5,Y+5,10,3);
+
+  // legs
+  const sw = player.moving ? (player.frame%2?2:-2) : 0;
+  c.fillStyle='#22283a'; c.fillRect(X-3+ (sw>0?1:0), Y+1, 2,5); c.fillRect(X+1-(sw<0?1:0), Y+1, 2,5);
+  c.fillStyle='#14171f'; c.fillRect(X-3,Y+5,3,2); c.fillRect(X+1,Y+5,3,2);
+
+  // coat
+  c.fillStyle='#2f3d57'; c.fillRect(X-5,top+5,10,7);
+  c.fillStyle='#24304a'; c.fillRect(X-5,top+11,10,1);
+  c.fillStyle='#ffe26a'; c.fillRect(X-5,top+8,10,1);           // reflective stripe
+  c.fillStyle='#3d4e6d'; c.fillRect(X-5,top+5,10,1);
+
+  // head + helmet
+  c.fillStyle='#f0c39a'; c.fillRect(X-3,top+1,6,5);
+  c.fillStyle='#d1a077'; c.fillRect(X-3,top+4,6,1);
+  c.fillStyle='#f5b21f'; c.fillRect(X-4,top-1,8,3);
+  c.fillStyle='#ffd964'; c.fillRect(X-4,top-1,8,1);
+  c.fillStyle='#c8890f'; c.fillRect(X-5,top+1,10,1);           // brim
+  // face details by facing
+  c.fillStyle='#2a1d17';
+  if(player.dy>0.4){ c.fillRect(X-2,top+3,1,1); c.fillRect(X+1,top+3,1,1); }
+  else if(player.dx<-0.4){ c.fillRect(X-2,top+3,1,1); }
+  else if(player.dx>0.4){ c.fillRect(X+1,top+3,1,1); }
+
+  // arms + nozzle
+  const nx = X + player.dx*8, ny = top+8 + player.dy*5;
+  c.fillStyle='#d8dee9'; c.fillRect(X-1+player.dx*4, top+7+player.dy*3, 3,3);
+  c.fillStyle='#cfd6e2'; c.fillRect(Math.round(nx)-2, Math.round(ny)-2, 4,4);
+  c.fillStyle='#8b98ab'; c.fillRect(Math.round(nx)-1, Math.round(ny)-1, 2,2);
+
+  // chopping swing
+  if(player.chopping){
+    const sway = Math.sin(G.time*22)*3;
+    const ax = X+player.dx*10, ay = top+8+player.dy*6+sway;
+    c.fillStyle='#6b4423'; c.fillRect(Math.round(ax)-1,Math.round(ay)-3,2,6);
+    c.fillStyle='#c9d2dd'; c.fillRect(Math.round(ax)-2,Math.round(ay)-5,4,3);
+  }
+}
+
+function drawSurvivors(c){
+  for(const s of G.survivors){
+    if(s.saved || s.lost) continue;
+    const X=Math.round(s.x), Y=Math.round(s.y);
+    const wob = Math.round(Math.sin(s.t*(s.panic?11:3))*(s.panic?2:1));
+    c.fillStyle='rgba(0,0,0,.3)'; c.fillRect(X-4,Y+4,8,2);
+    c.fillStyle='#8e3fbf'; c.fillRect(X-3,Y-3,6,7);            // shirt
+    c.fillStyle='#6e2e98'; c.fillRect(X-3,Y+2,6,2);
+    c.fillStyle='#f0c39a'; c.fillRect(X-2,Y-7,4,4);            // head
+    c.fillStyle='#4a2c12'; c.fillRect(X-2,Y-8,4,2);            // hair
+    c.fillStyle='#22283a'; c.fillRect(X-2,Y+4,2,2); c.fillRect(X,Y+4,2,2);
+    // waving arm
+    c.fillStyle='#f0c39a'; c.fillRect(X+3,Y-4+wob,2,3);
+    // help marker
+    const bl = Math.sin(s.t*6)>0;
+    if(bl || s.panic){
+      c.fillStyle = s.panic ? '#ff5b5b' : '#ffe26a';
+      c.fillRect(X-1,Y-16,2,5); c.fillRect(X-1,Y-10,2,2);
+    }
+  }
+}
+
+function drawParticles(c){
+  for(const p of G.particles){
+    const a = p.life/p.max;
+    const X=Math.round(p.x), Y=Math.round(p.y);
+    if(p.kind===0){
+      c.fillStyle = a>0.66?'#fff0a8':a>0.33?'#ff9a2e':'#a8341a';
+      c.fillRect(X,Y,Math.max(1,(2*p.s)|0),Math.max(1,(2*p.s)|0));
+    } else if(p.kind===1){
+      c.fillStyle = a>0.5?'#bfe6ff':'#5fa8e8';
+      c.fillRect(X,Y,2,2);
+    } else {
+      c.fillStyle='#8a6b3f'; c.fillRect(X,Y,2,2);
+    }
+  }
+  c.font='6px monospace'; c.textAlign='center';
+  for(const f of G.floats){
+    c.globalAlpha=Math.min(1,f.life*1.6);
+    c.fillStyle='#000'; c.fillText(f.txt,Math.round(f.x)+1,Math.round(f.y)+1);
+    c.fillStyle=f.col; c.fillText(f.txt,Math.round(f.x),Math.round(f.y));
+  }
+  c.globalAlpha=1; c.textAlign='left';
+}
+
+// ---------------------------------------------------------------- HUD
+function text(c,s,x,y,col,size,align,shadow){
+  c.font=(size||8)+'px ui-monospace, "Courier New", monospace';
+  c.textAlign=align||'left'; c.textBaseline='top';
+  if(shadow!==false){ c.fillStyle='#000'; c.fillText(s,x+1,y+1); }
+  c.fillStyle=col; c.fillText(s,x,y);
+}
+
+function drawHUD(c){
+  c.fillStyle='rgba(12,8,18,.86)'; c.fillRect(0,0,VW,HUD_H);
+  c.fillStyle='#ff8a3d'; c.fillRect(0,HUD_H-1,VW,1);
+
+  text(c,'SCORE '+String(G.score).padStart(6,'0'),6,4,'#ffe26a',8);
+  text(c,'LEVEL '+G.level+'/5',6,15,'#b79cd6',8);
+
+  // water gauge
+  text(c,'WATER',96,4,'#8fd6ff',8);
+  c.fillStyle='#10202f'; c.fillRect(96,15,74,7);
+  c.fillStyle='#0b3a5e'; c.fillRect(97,16,72,5);
+  const wfrac=player.water/player.maxwater;
+  c.fillStyle = wfrac<0.25 ? '#ff6a4a' : '#3fa9f5';
+  c.fillRect(97,16,Math.round(72*wfrac),5);
+  c.fillStyle='rgba(255,255,255,.35)'; c.fillRect(97,16,Math.round(72*wfrac),1);
+  c.strokeStyle='#4a5f7a'; c.lineWidth=1; c.strokeRect(96.5,15.5,73,6);
+
+  // hearts
+  for(let i=0;i<player.maxhp;i++){
+    const hx=182+i*11, hy=15, on=i<player.hp;
+    c.fillStyle = on ? '#e5484d' : '#3a2530';
+    c.fillRect(hx+1,hy+1,2,2); c.fillRect(hx+5,hy+1,2,2);
+    c.fillRect(hx,hy+2,8,3); c.fillRect(hx+1,hy+5,6,1); c.fillRect(hx+2,hy+6,4,1); c.fillRect(hx+3,hy+7,2,1);
+    if(on){ c.fillStyle='#ff9aa0'; c.fillRect(hx+1,hy+2,2,1); }
+  }
+  text(c,'CREW',182,4,'#ff8a8a',8);
+
+  // survivors
+  const saved=G.survivors.filter(s=>s.saved).length;
+  text(c,'RESCUED',228,4,'#c9a2ff',8);
+  text(c,saved+'/'+G.survivors.length,228,15,'#ffffff',8);
+  if(G.lost>0) text(c,'LOST '+G.lost+'/3',228+30,15,'#ff5b5b',8);
+
+  // forest integrity
+  const green=countGreen(), frac=green/G.greenStart;
+  text(c,'FOREST',278,4,'#7ddc6a',8);
+  c.fillStyle='#132014'; c.fillRect(278,15,70,7);
+  c.fillStyle = frac>0.7?'#4caf50':frac>0.5?'#c9b02e':'#e5484d';
+  c.fillRect(279,16,Math.round(68*frac),5);
+  c.strokeStyle='#3b5c3b'; c.strokeRect(278.5,15.5,69,6);
+  text(c,Math.round(frac*100)+'%',352,15,'#dfffd6',8);
+
+  // fires + strikes
+  text(c,'FIRES',384,4,'#ff8a3d',8);
+  text(c,String(countFires()).padStart(3,'0'),384,15,'#ffc46a',8);
+
+  // wind compass
+  const wcx=468, wcy=17;
+  text(c,'WIND',452,4,'#9fd0ff',8);
+  c.fillStyle='#1b1426'; c.fillRect(wcx-11,wcy-8,24,17);
+  c.strokeStyle='#4a3a63'; c.strokeRect(wcx-10.5,wcy-7.5,23,16);
+  const ax=Math.cos(G.wind.a), ay=Math.sin(G.wind.a);
+  c.strokeStyle='#8fd6ff'; c.lineWidth=1; c.beginPath();
+  c.moveTo(wcx-ax*6, wcy-ay*6); c.lineTo(wcx+ax*6, wcy+ay*6); c.stroke();
+  c.fillStyle='#ffe26a';
+  c.fillRect(Math.round(wcx+ax*6)-1, Math.round(wcy+ay*6)-1, 3,3);
+  // strength pips
+  for(let i=0;i<3;i++){ c.fillStyle = G.wind.s > 0.4+i*0.35 ? '#ff8a3d':'#3a2c4a'; c.fillRect(wcx-10+i*3, wcy+6, 2,2); }
+}
+
+// ---------------------------------------------------------------- screens
+function panel(c,x,y,w,h){
+  c.fillStyle='rgba(10,6,16,.90)'; c.fillRect(x,y,w,h);
+  c.strokeStyle='#ff8a3d'; c.lineWidth=1; c.strokeRect(x+.5,y+.5,w-1,h-1);
+  c.strokeStyle='#5a2f12'; c.strokeRect(x+2.5,y+2.5,w-5,h-5);
+}
+
+function drawTitle(c){
+  // animated ember backdrop
+  c.fillStyle='#160a10'; c.fillRect(0,0,VW,VH);
+  for(let i=0;i<90;i++){
+    const t=(G.time*0.35 + i*0.137)%1;
+    const x=(i*67.3)%VW, y=VH - t*VH - (i%7)*3;
+    c.fillStyle = i%3? 'rgba(255,140,50,'+(0.5*(1-t))+')' : 'rgba(255,220,120,'+(0.4*(1-t))+')';
+    c.fillRect(Math.round(x+Math.sin(G.time*2+i)*6), Math.round(y), 2,2);
+  }
+  // ridge line
+  c.fillStyle='#2a1420';
+  for(let x=0;x<VW;x+=4){ const hgt=30+Math.sin(x*0.05)*10+Math.sin(x*0.013)*16; c.fillRect(x,VH-hgt,4,hgt); }
+  c.fillStyle='#120810';
+  for(let x=0;x<VW;x+=4){ const hgt=16+Math.sin(x*0.08+2)*7; c.fillRect(x,VH-hgt,4,hgt); }
+
+  const ty = 82;
+  c.textAlign='center';
+  c.font='bold 40px ui-monospace, "Courier New", monospace';
+  c.fillStyle='#7a2410'; c.fillText('WILDFIRE',VW/2+3,ty+3);
+  c.fillStyle='#ff6a1f'; c.fillText('WILDFIRE',VW/2,ty);
+  c.font='bold 40px ui-monospace, "Courier New", monospace';
+  c.fillStyle='#ffd34a'; c.fillText('WILDFIRE',VW/2,ty-2);
+  c.textAlign='left';
+
+  text(c,'F O R E S T   D E F E N S E   U N I T',VW/2,ty+46,'#c9a2ff',9,'center');
+
+  panel(c,80,166,352,124);
+  text(c,'CONTAIN THE BURN · SAVE THE CAMPERS',VW/2,178,'#ffe26a',9,'center');
+  const rows=[
+    ['WASD / ARROWS','MOVE'],
+    ['SPACE / J','FIRE HOSE  (refill at water)'],
+    ['SHIFT / K','CUT FIREBREAK'],
+    ['P','PAUSE    R RESTART    M MUTE']
+  ];
+  rows.forEach((r,i)=>{ text(c,r[0],96,202+i*18,'#8fd6ff',8); text(c,r[1],212,202+i*18,'#d8cfe8',8); });
+
+  if(Math.sin(G.time*4)>-0.2) text(c,'PRESS  ENTER  OR  SPACE  TO  DEPLOY',VW/2,310,'#ffffff',10,'center');
+  text(c,'WIND CARRIES THE FLAME — WATCH THE COMPASS',VW/2,332,'#8a7599',8,'center');
+}
+
+const GRADE_COL = { S:'#ffe26a', A:'#7ddc6a', B:'#8fd6ff', C:'#d8a24a', D:'#ff7b6a' };
+
+function drawBrief(c){
+  panel(c,104,136,304,132);
+  text(c,'SECTOR '+(G.clearedLevel||1)+' CONTAINED',VW/2,150,'#7ddc6a',12,'center');
+
+  const saved=G.survivors.filter(s=>s.saved).length;
+  const rows=[
+    ['CAMPERS RESCUED', saved+' / '+G.survivors.length, '#ffe26a'],
+    ['FOREST STANDING', Math.round(countGreen()/G.greenStart*100)+'%', '#8fd6ff'],
+    ['RESCUE BONUS',    '+'+(G.bonusRescue||0), '#c9a2ff'],
+    ['FOREST BONUS',    '+'+(G.bonusForest||0), '#c9a2ff'],
+    ['TOTAL SCORE',     String(G.score), '#ffffff']
+  ];
+  rows.forEach((r,i)=>{
+    text(c,r[0],126,172+i*13,'#8b7aa0',8);
+    text(c,r[1],324,172+i*13,r[2],8,'right');
+  });
+
+  // grade stamp
+  const g=G.grade||'C';
+  c.font='bold 26px ui-monospace, "Courier New", monospace'; c.textAlign='center'; c.textBaseline='top';
+  c.fillStyle='#000'; c.fillText(g,362,182);
+  c.fillStyle=GRADE_COL[g]; c.fillText(g,361,181);
+  c.strokeStyle=GRADE_COL[g]; c.lineWidth=1; c.strokeRect(345.5,176.5,31,34);
+  c.textAlign='left';
+
+  if(Math.sin(G.time*5)>-0.2) text(c,'PRESS ENTER — DEPLOY TO SECTOR '+G.level,VW/2,248,'#ff9a3d',9,'center');
+}
+
+function drawOver(c){
+  c.fillStyle='rgba(60,8,4,.55)'; c.fillRect(0,0,VW,VH);
+  panel(c,100,150,312,110);
+  text(c,'GAME OVER',VW/2,168,'#ff5b5b',16,'center');
+  text(c,G.msg,VW/2,198,'#ffb9b9',8,'center');
+  text(c,'FINAL SCORE  '+G.score,VW/2,216,'#ffe26a',10,'center');
+  if(Math.sin(G.time*5)>-0.2) text(c,'PRESS R TO REDEPLOY',VW/2,238,'#ffffff',9,'center');
+}
+
+function drawWin(c){
+  c.fillStyle='rgba(6,30,12,.55)'; c.fillRect(0,0,VW,VH);
+  panel(c,92,142,328,126);
+  text(c,'FIRE CONTAINED',VW/2,158,'#7ddc6a',15,'center');
+  text(c,'ALL FIVE SECTORS HELD.',VW/2,190,'#dfffd6',9,'center');
+  text(c,'THE FOREST STANDS.',VW/2,204,'#dfffd6',9,'center');
+  text(c,'FINAL SCORE  '+G.score,VW/2,224,'#ffe26a',11,'center');
+  if(Math.sin(G.time*5)>-0.2) text(c,'PRESS R TO PLAY AGAIN',VW/2,248,'#ffffff',9,'center');
+}
+
+function drawPause(c){
+  c.fillStyle='rgba(0,0,0,.6)'; c.fillRect(0,0,VW,VH);
+  panel(c,166,178,180,64);
+  text(c,'PAUSED',VW/2,194,'#ffe26a',14,'center');
+  text(c,'PRESS P TO RESUME',VW/2,218,'#d8cfe8',8,'center');
+}
+
+// ---------------------------------------------------------------- main loop
+let last = performance.now();
+
+function frame(now){
+  let dt = (now-last)/1000; last = now;
+  dt = Math.min(dt, 0.05);
+  G.time += dt;
+
+  if(G.state===ST.PLAY) update(dt);
+  else if(G.state!==ST.TITLE){ updateParticles(dt); }
+
+  render();
+  requestAnimationFrame(frame);
+}
+
+function update(dt){
+  // wind drifts, occasionally gusts to a new heading
+  G.wind.a += Math.sin(G.time*0.27)*dt*0.16;
+  if(Math.random() < dt*0.06){ G.wind.tgt = Math.random()*Math.PI*2; }
+  let d = G.wind.tgt - G.wind.a;
+  while(d>Math.PI) d-=Math.PI*2; while(d<-Math.PI) d+=Math.PI*2;
+  G.wind.a += d*Math.min(1,dt*0.35);
+
+  // scheduled lightning strikes ramp the pressure
+  if(G.strikesLeft>0){
+    G.strikeT -= dt;
+    if(G.strikeT<=0){ lightning(false); G.strikesLeft--; G.strikeT = Math.max(7.0, 16 - G.level*1.2); }
+  }
+
+  updatePlayer(dt);
+  updateFire(dt);
+  updateParticles(dt);
+  checkRules();
+
+  G.shake = Math.max(0, G.shake - dt*14);
+  G.flash = Math.max(0, G.flash - dt*2.2);
+}
+
+function render(){
+  const c = ctx;
+  c.fillStyle='#0b0710'; c.fillRect(0,0,VW,VH);
+
+  if(G.state===ST.TITLE){ drawTitle(c); return; }
+
+  if(G.dirty) renderTerrain();
+
+  c.save();
+  c.translate(0, WORLD_Y);
+  if(G.shake>0.2){ c.translate(Math.round((Math.random()-0.5)*G.shake), Math.round((Math.random()-0.5)*G.shake)); }
+
+  c.drawImage(terrainCv,0,0);
+  drawWet(c);
+  drawFlames(c);
+
+  // depth-sort the actors so things overlap correctly
+  drawSurvivors(c);
+  drawPlayer(c);
+  drawParticles(c);
+
+  // heat haze tint when a lot is burning
+  const fires = countFires();
+  if(fires>0){
+    c.fillStyle='rgba(255,90,20,'+Math.min(0.20, fires*0.0035)+')';
+    c.fillRect(0,0,WORLD_W,WORLD_H);
+  }
+  // vignette
+  const gr=c.createRadialGradient(WORLD_W/2,WORLD_H/2,110,WORLD_W/2,WORLD_H/2,310);
+  gr.addColorStop(0,'rgba(0,0,0,0)'); gr.addColorStop(1,'rgba(0,0,0,.45)');
+  c.fillStyle=gr; c.fillRect(0,0,WORLD_W,WORLD_H);
+
+  c.restore();
+
+  if(G.flash>0){ c.fillStyle='rgba(255,220,180,'+Math.min(0.5,G.flash*0.5)+')'; c.fillRect(0,0,VW,VH); }
+
+  drawHUD(c);
+
+  // all-clear escort banner
+  if(G.state===ST.PLAY && G.allClear>0){
+    const left = G.survivors.filter(s=>!s.saved && !s.lost).length;
+    if(left){
+      const bw=250, bx=(VW-bw)/2, by=VH-30;
+      c.fillStyle='rgba(8,20,10,.88)'; c.fillRect(bx,by,bw,22);
+      c.strokeStyle='#7ddc6a'; c.lineWidth=1; c.strokeRect(bx+.5,by+.5,bw-1,21);
+      text(c,'ALL CLEAR — ESCORT '+left+' CAMPER'+(left>1?'S':'')+' OUT',VW/2,by+4,'#bff5b0',8,'center');
+      const secs = Math.max(0, Math.ceil(25-G.allClear));
+      text(c,'SELF-EVAC IN '+secs+'s',VW/2,by+13,'#6f9a66',7,'center');
+    }
+  }
+
+  if(G.state===ST.PAUSE) drawPause(c);
+  else if(G.state===ST.OVER) drawOver(c);
+  else if(G.state===ST.WIN)  drawWin(c);
+  else if(G.state===ST.BRIEF) drawBrief(c);
+}
+
+// ---------------------------------------------------------------- input
+function startRun(){
+  G.level=1; G.score=0; player.maxhp=3;
+  generateMap(1); G.state=ST.PLAY; Sfx.start();
+}
+function nextLevel(){ generateMap(G.level); G.state=ST.PLAY; }
+
+window.addEventListener('keydown', e=>{
+  const k = e.key.length===1 ? e.key.toLowerCase() : e.key.toLowerCase();
+  keys[k]=true;
+  if([' ','arrowup','arrowdown','arrowleft','arrowright'].includes(k)) e.preventDefault();
+  Sfx.resume();
+
+  if(k==='m'){ Sfx.toggle(); return; }
+  if(G.state===ST.TITLE && (k==='enter'||k===' ')) { startRun(); return; }
+  if(G.state===ST.BRIEF && (k==='enter'||k===' ')) { nextLevel(); return; }
+  if((G.state===ST.OVER||G.state===ST.WIN) && k==='r'){ startRun(); return; }
+  if(G.state===ST.PLAY && k==='p'){ G.state=ST.PAUSE; return; }
+  if(G.state===ST.PAUSE && k==='p'){ G.state=ST.PLAY; return; }
+  if(G.state===ST.PLAY && k==='r'){ startRun(); return; }
+});
+window.addEventListener('keyup', e=>{ keys[e.key.toLowerCase()]=false; });
+window.addEventListener('blur', ()=>{ for(const k in keys) keys[k]=false; if(G.state===ST.PLAY) G.state=ST.PAUSE; });
+
+// touch
+(function(){
+  const isTouch = ('ontouchstart' in window) || navigator.maxTouchPoints>0;
+  const pad = document.getElementById('touch');
+  if(isTouch){ pad.classList.remove('hidden'); pad.classList.add('grid'); }
+  pad.querySelectorAll('button').forEach(b=>{
+    const k=b.dataset.k;
+    const on=e=>{ e.preventDefault(); Sfx.resume(); touch[k]=1;
+      if(G.state===ST.TITLE) startRun();
+      else if(G.state===ST.BRIEF) nextLevel();
+      else if(G.state===ST.OVER||G.state===ST.WIN) startRun();
+    };
+    const off=e=>{ e.preventDefault(); touch[k]=0; };
+    b.addEventListener('touchstart',on,{passive:false}); b.addEventListener('touchend',off,{passive:false});
+    b.addEventListener('touchcancel',off,{passive:false});
+    b.addEventListener('mousedown',on); b.addEventListener('mouseup',off); b.addEventListener('mouseleave',off);
+  });
+  canvas.addEventListener('pointerdown',()=>{
+    Sfx.resume();
+    if(G.state===ST.TITLE) startRun();
+    else if(G.state===ST.BRIEF) nextLevel();
+    else if(G.state===ST.OVER||G.state===ST.WIN) startRun();
+  });
+})();
+
+// ---------------------------------------------------------------- boot
+generateMap(1);            // build a map so the title screen has state behind it
+G.state = ST.TITLE;
+requestAnimationFrame(frame);
+console.log('WILDFIRE booted — canvas', VW+'x'+VH, '| tiles', COLS+'x'+ROWS);
+</script>
+</body>
+</html>

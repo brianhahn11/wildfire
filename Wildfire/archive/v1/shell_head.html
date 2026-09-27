@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WILDFIRE — Vertical Slice (Ironclad / Pyraling / Rustfields)</title>
+<style>
+  :root{ color-scheme: dark; }
+  *{ box-sizing:border-box; }
+  html,body{ margin:0; padding:0; background:#0d0a12; }
+  body{
+    font-family:ui-monospace,"SFMono-Regular",Menlo,"Courier New",monospace;
+    -webkit-user-select:none; user-select:none;
+    display:flex; align-items:flex-start; justify-content:center;
+    padding:12px; min-height:100vh;
+  }
+  .wrap{ width:100%; max-width:1440px; }
+  .bar{ display:flex; align-items:flex-end; justify-content:space-between;
+        margin:0 2px 8px; gap:16px; flex-wrap:wrap; }
+  h1{ margin:0; font-size:15px; letter-spacing:.34em; color:#ff8a3c;
+      text-shadow:2px 2px 0 #7a2410; }
+  .sub{ margin:3px 0 0; font-size:10px; letter-spacing:.18em; color:#6a6070; }
+  .meta{ margin:0; font-size:10px; line-height:15px; color:#6a6070; text-align:right; }
+  .meta b{ color:#c9a2ff; font-weight:600; }
+  .screen{ position:relative; background:#000; border-radius:4px; overflow:hidden;
+           box-shadow:0 0 0 3px #241a33, 0 0 0 6px #120c1c,
+                      0 0 50px rgba(255,120,40,.18), 0 16px 50px rgba(0,0,0,.7); }
+  canvas{ image-rendering:pixelated; image-rendering:crisp-edges;
+          display:block; width:100%; height:auto; }
+  .scan{ position:absolute; inset:0; pointer-events:none; mix-blend-mode:multiply;
+         background:repeating-linear-gradient(to bottom,
+           rgba(0,0,0,0) 0 2px, rgba(0,0,0,.14) 3px 4px); }
+  .legend{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+           gap:6px 18px; margin:10px 2px 0; font-size:10px; color:#6a6070; }
+  .legend b{ color:#8fd6ff; font-weight:600; }
+  .note{ margin:10px 2px 0; font-size:10px; color:#4e4658; line-height:16px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <div>
+      <h1>WILDFIRE</h1>
+      <p class="sub">VERTICAL SLICE &middot; IRONCLAD / PYRALING / THE RUSTFIELDS</p>
+    </div>
+    <p class="meta">
+      480&times;270 native &middot; 16&times;16 tiles &middot; 16&times;24 characters &middot; 12&times;12 dragon<br>
+      <b>Built to GDD v2.0</b> &mdash; combat feel + dragon mutation loop
+    </p>
+  </div>
+
+  <div class="screen">
+    <canvas id="game" width="480" height="270"></canvas>
+    <div class="scan"></div>
+  </div>
+
+  <div class="legend">
+    <div><b>WASD</b> move (8-directional)</div>
+    <div><b>J</b> or click &mdash; greatsword combo</div>
+    <div><b>SPACE</b> dodge roll (i-frames)</div>
+    <div><b>1</b> Forge Cleave &middot; <b>2</b> Iron Tempest</div>
+    <div><b>3</b> Unyielding Charge &middot; <b>4</b> Earthsplitter</div>
+    <div><b>Q</b> Ember Breath &middot; <b>TAB</b> Refinery</div>
+  </div>
+
+  <p class="note">
+    Momentum builds on every connected hit and resets when you take one. At 5 stacks
+    Forge Cleave widens to 270&deg; and Earthsplitter splits three ways. Mutations drop
+    between waves &mdash; slot them at the Refinery and the dragon changes shape and numbers together.
+  </p>
+</div>
+
+<script>
